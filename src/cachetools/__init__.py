@@ -12,7 +12,7 @@ __all__ = (
     "cachedmethod",
 )
 
-__version__ = "7.2.0"
+__version__ = "7.2.4"
 
 import collections
 import collections.abc
@@ -52,7 +52,7 @@ class Cache(collections.abc.MutableMapping):
     def __init__(self, maxsize, getsizeof=None):
         if maxsize < 0:
             raise ValueError("maxsize must be non-negative")
-        if getsizeof:
+        if getsizeof is not None:
             self.getsizeof = getsizeof
         if self.getsizeof is not Cache.getsizeof:
             self.__size = {}
@@ -357,9 +357,10 @@ class RRCache(Cache):
 
     def popitem(self):
         """Remove and return a random `(key, value)` pair."""
-        if not self.__keys:
+        keys = self.__keys
+        if not keys:
             raise KeyError("%s is empty" % type(self).__name__) from None
-        key = self.__choice(self.__keys)
+        key = self.__choice(keys)
         return (key, self.pop(key))
 
     def clear(self):
@@ -494,6 +495,7 @@ class TTLCache(_TimedCache):
 
     def __setitem__(self, key, value, cache_setitem=Cache.__setitem__):
         with self.timer as time:
+            expires = time + self.__ttl
             self.expire(time)
             cache_setitem(self, key, value)
         try:
@@ -502,7 +504,7 @@ class TTLCache(_TimedCache):
             self.__links[key] = link = TTLCache._Link(key)
         else:
             link.unlink()
-        link.expires = time + self.__ttl
+        link.expires = expires
         link.next = root = self.__root
         link.prev = prev = root.prev
         prev.next = root.prev = link

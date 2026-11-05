@@ -50,9 +50,7 @@ version = {attr = "cachetools.__version__"}
 
 [tool.pyright]
 typeCheckingMode = "standard"
-reportFunctionMemberAccess = "information"
-reportOptionalContextManager = "warning"
-reportOptionalMemberAccess = "warning"
+reportUnnecessaryTypeIgnoreComment = "error"
 
 [tool.ruff.lint]
 ignore = ["DTZ005", "UP031"]

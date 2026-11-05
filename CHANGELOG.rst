@@ -1,3 +1,47 @@
+v7.2.4 (2026-10-19)
+===================
+
+- Restore autospec calls to ``@cachedmethod`` decorated methods.
+
+- Improve branch coverage of unit tests.
+
+- Minor type stub improvements.
+
+
+v7.2.3 (2026-10-17)
+===================
+
+- Fix ``@cached`` decorator stacking behavior.
+
+- Minor type stub improvements.
+
+
+v7.2.2 (2026-10-15)
+===================
+
+- Fix ``@cachedmethod`` for subclasses that override a decorated
+  method and call the base class implementation via ``super()``.
+
+- Restore class access to instance methods decorated with
+  ``@cachedmethod``.
+
+- Improve ``TTLCache`` robustness when calculating expiration time
+  fails.
+
+- Various unit test improvements.
+
+
+v7.2.1 (2026-10-05)
+===================
+
+- Improve error handling for ``RRCache.popitem()`` when the cache is
+  empty.
+
+- Minor style and documentation improvements.
+
+- Update CI environment.
+
+
 v7.2.0 (2026-09-16)
 ===================
 

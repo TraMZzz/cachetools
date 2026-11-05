@@ -177,6 +177,17 @@ class TTLCacheTest(unittest.TestCase, CacheTestMixin):
         self.assertNotIn(2, cache)
         self.assertNotIn(3, cache)
 
+    def test_ttl_iter_expired(self):
+        cache = TTLCache[int, int, int](maxsize=2, ttl=2, timer=Timer())
+        cache[1] = 1
+        cache.timer.tick()
+        cache[2] = 2
+        cache.timer.tick()
+        # a bare for loop skips expired items without removing them
+        self.assertEqual([2], [key for key in cache])
+        self.assertEqual({(1, 1)}, set(cache.expire()))
+        self.assertEqual([2], [key for key in cache])
+
     def test_ttl_atomic(self):
         cache = TTLCache[int, int, int](maxsize=1, ttl=2, timer=Timer(auto=True))
         cache[1] = 1
@@ -217,6 +228,22 @@ class TTLCacheTest(unittest.TestCase, CacheTestMixin):
         items = cache.expire(datetime.now() + timedelta(days=1))
         self.assertEqual([(1, 1)], list(items))
         self.assertEqual(0, len(cache))
+
+    def test_ttl_datetime_overflow(self):
+        from datetime import datetime, timedelta
+
+        cache = TTLCache[str, int, datetime](
+            maxsize=1, ttl=timedelta(days=1), timer=lambda: datetime.max
+        )
+
+        with self.assertRaises(OverflowError):
+            cache["overflow"] = 1
+
+        self.assertNotIn("overflow", cache)
+        self.assertEqual(0, len(cache))
+        self.assertEqual(0, cache.currsize)
+        self.assertEqual([], list(cache))
+        self.assertEqual([], cache.expire())
 
     def test_ttl_clear(self):
         cache = TTLCache[int, int, int](maxsize=2, ttl=2, timer=Timer())

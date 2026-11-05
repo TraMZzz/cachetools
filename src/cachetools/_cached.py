@@ -1,5 +1,7 @@
 """Function decorator helpers."""
 
+# pyright: reportFunctionMemberAccess=false
+
 __all__ = ()
 
 import functools
@@ -9,6 +11,10 @@ import warnings
 # over ease of maintenance, thus providing separate wrappers for
 # all valid combinations of decorator parameters lock, condition and
 # info.
+#
+# Each wrapper calls functools.update_wrapper() before setting its own
+# attributes, so func.__dict__ cannot override wrapper state, e.g. when
+# stacking decorators.
 
 
 def _condition_info(func, cache, key, lock, cond, info):
@@ -50,6 +56,7 @@ def _condition_info(func, cache, key, lock, cond, info):
         with lock:
             return info(hits, misses)
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = cache_clear
     wrapper.cache_info = cache_info
     return wrapper
@@ -88,6 +95,7 @@ def _locked_info(func, cache, key, lock, info):
         with lock:
             return info(hits, misses)
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = cache_clear
     wrapper.cache_info = cache_info
     return wrapper
@@ -120,6 +128,7 @@ def _unlocked_info(func, cache, key, info):
     def cache_info():
         return info(hits, misses)
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = cache_clear
     wrapper.cache_info = cache_info
     return wrapper
@@ -137,6 +146,7 @@ def _uncached_info(func, info):
         nonlocal misses
         misses = 0
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = cache_clear
     wrapper.cache_info = lambda: info(0, misses)
     return wrapper
@@ -171,6 +181,7 @@ def _condition(func, cache, key, lock, cond):
         with lock:
             cache.clear()
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = cache_clear
     return wrapper
 
@@ -197,6 +208,7 @@ def _locked(func, cache, key, lock):
         with lock:
             cache.clear()
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = cache_clear
     return wrapper
 
@@ -215,6 +227,7 @@ def _unlocked(func, cache, key):
             pass  # value too large
         return v
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = lambda: cache.clear()
     return wrapper
 
@@ -223,6 +236,7 @@ def _uncached(func):
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
 
+    functools.update_wrapper(wrapper, func)
     wrapper.cache_clear = lambda: None
     return wrapper
 
@@ -263,5 +277,4 @@ def _wrapper(func, cache, key, lock=None, cond=None, info=None):
     wrapper.cache_key = key
     wrapper.cache_lock = lock if lock is not None else cond
     wrapper.cache_condition = cond
-
-    return functools.update_wrapper(wrapper, func)
+    return wrapper

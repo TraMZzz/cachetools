@@ -1,94 +1,124 @@
 # Copilot Instructions for cachetools
 
-## Architecture Overview
-**cachetools** provides extensible memoizing collections and decorators, including variants of Python's `@lru_cache`. Pure Python 3.10+, no external runtime dependencies.
+**cachetools** provides extensible memoizing collections and decorators, including
+variants of Python's `@functools.lru_cache`. Pure Python ≥ 3.10, no runtime
+dependencies, inline type stubs (`py.typed`). Single maintainer; `master` is the
+release branch.
 
-### Core Design Pattern
-- All caches inherit from `Cache` (a `MutableMapping` with `maxsize`, `currsize`, and `getsizeof`)
-- Subclasses override `__setitem__`, `__getitem__`, `__delitem__`, and `popitem()` to implement eviction policies
-- **Critical:** Subclasses use default parameter trick (e.g., `cache_setitem=Cache.__setitem__`) to call parent methods efficiently while avoiding recursion
-- `Cache.__init__` rejects negative `maxsize` eagerly (`ValueError`); `maxsize=0` (no-space cache) and `math.inf` (unbounded) remain valid
-- `Cache.__setitem__` rejects negative `getsizeof` results and values larger than `maxsize` (`ValueError`); when replacing an existing key it evicts until the *new* size fits, recomputing `diffsize` if the key itself gets evicted
-- `Cache` rolls its own `get()`/`pop()`/`setdefault()` instead of inheriting them, because the `MutableMapping` defaults assume `__getitem__` raises `KeyError` — untrue when `__missing__` is implemented
-- Every subclass overrides `clear()` so it is O(1) instead of the `MutableMapping` O(n) `popitem()` loop; `_TimedCache.clear()` deliberately skips `expire()` for the same reason
-- Caches happen to be picklable (`test_pickle`, `test_pickle_maxsize`; `_Timer.__reduce__` and `TTLCache.__setstate__` rebuild time-tracking state), but **pickling is neither officially supported nor documented**. The pickle format is an implementation detail that even a minor or bugfix release may change, so pickled caches must only be unpickled with the exact same `cachetools` version that created them. Do not document, advertise, or build features on pickle compatibility
+## Ground Rules
 
-### Cache Types
-- `FIFOCache`: Evicts oldest inserted (`OrderedDict`)
-- `LRUCache`: Evicts least recently used (`OrderedDict.move_to_end()`)
-- `LFUCache`: Evicts least frequently used; doubly-linked list of `_Link` frequency buckets (`__slots__`, `keys` set) anchored at a sentinel `__root`, plus a `__links` key→bucket dict
-- `RRCache`: Random eviction (`__keys` list with `__index` dict for O(1) removal)
-- `TTLCache`/`TLRUCache`: Time-based eviction via `_TimedCache` base; `_Timer` context manager freezes time during operations to prevent TOCTOU bugs (re-entrant via `__nesting`, proxies the wrapped timer through `__getattr__`); `expire()` returns `list[tuple[key, value]]`
+- **Run everything through `tox`**, never bare `pytest`.
+- **Do not edit `CHANGELOG.rst` or bump `__version__`** — both are release-only.
+- **Pickling caches is unsupported.** It happens to work (`test_pickle*`), but the
+  format format is an implementation detail that any release may change. Do not document, advertise, or build features on it.
+- PRs must reference an open issue (except trivial fixes). Prefer separate commits:
+  `Fix #123: ...`, `Tests for #123: ...`, `Docs for #123: ...`.
+- New behavior needs tests under `tests/`; user-visible features need docs in
+  `docs/index.rst` (doctested).
+- Prefer clarity and performance over DRY: the decorator modules duplicate one
+  wrapper per lock/condition/info combination. Apply changes to **all** variants.
 
-### Decorators
-- `@cached` (`_cached.py`): Function memoization; separate wrappers for each lock/condition/info combination; supports `cache=None` via `_uncached`/`_uncached_info` wrappers (pass-through without caching)
-- `@cachedmethod` (`_cachedmethod.py`): Method memoization via descriptor protocol (`__set_name__`/`__get__`); class hierarchy: `_WrapperBase` (per-instance callable) → `_DescriptorBase` (descriptor with `__set_name__`/`__get__`, replaces self in instance `__dict__` via `setdefault` for thread safety) → `_DeprecatedDescriptorBase` (backward-compatible `@classmethod` support with warnings); the backward-compatible `_condition` variant uses `weakref.WeakKeyDictionary` for per-instance pending sets
-- `_DescriptorBase` error cases: `__set_name__` raises `TypeError` if the same descriptor is bound to two names; `__get__` raises `TypeError` when the instance has no writable `__dict__` (e.g. `__slots__`) or when `__set_name__` was never called — the deprecated `@classmethod` path warns instead of raising; `obj is None` (class access) returns the bare wrapper so `mock.patch(autospec=True)` works
-- Both support `key`, `lock`, `condition`, and `info` parameters; when `condition` is given without `lock`, `condition` serves as both lock and condition
-- `info=True` adds `cache_info()`/`cache_clear()`; `info=False` (default) only provides `cache_clear()`
-- `func.py`: `functools.lru_cache`-compatible wrappers; all use `threading.Condition()` by default for thread safety + stampede prevention; `_UnboundTTLCache` extends `TTLCache` with `math.inf` maxsize for `maxsize=None`
+## Architecture
 
-### Thread Safety
-3-tier locking: **Unlocked** | **Locked** (release during compute) | **Condition** (lock + pending set + `wait_for`/`notify_all` to prevent thundering herd)
+### Caches (`src/cachetools/__init__.py`)
+- `Cache` is a `MutableMapping` with `maxsize`, `currsize`, `getsizeof`. `maxsize=0`
+  and `math.inf` are valid; negative values raise `ValueError`. Without a custom
+  `getsizeof`, no per-key size dict is kept (`_DefaultSize`). A value's size must not
+  change after insertion.
+- `get()`/`pop()`/`setdefault()` are implemented directly to work with `__missing__`.
+- Subclasses override `__setitem__`, `__delitem__`, `popitem()` (optionally
+  `__getitem__`) and `clear()` (O(1)). **Bind parent methods via default parameters**
+  (`cache_setitem=Cache.__setitem__`) for speed and to avoid recursion. After calling
+  the parent `__getitem__`, check `key in self` to handle `__missing__` values.
+- `FIFOCache`/`LRUCache` use `OrderedDict`; `LFUCache` a linked list of frequency
+  buckets; `RRCache` a key list plus index dict and checks for emptiness before
+  calling `choice`.
+- `_TimedCache` (base of `TTLCache`/`TLRUCache`) wraps the timer in a re-entrant
+  `_Timer` that freezes time per operation. `__len__`, `__repr__`, `currsize` expire
+  first; `clear()` does not. `expire()` returns the removed `(key, value)` pairs.
+  Deleting a present-but-expired key removes it and raises `KeyError`.
+- `TTLCache`: LRU `OrderedDict` plus an expiry-ordered linked list; computes
+  `expires` before mutating state. `TLRUCache`: per-item `ttu()`, min-heap with lazy
+  deletion, compacted in `expire()`.
 
-`_AbstractCondition` protocol in `__init__.pyi`: extends `AbstractContextManager[Any]` + `Protocol` with `wait()`, `wait_for()`, `notify()`, `notify_all()`. Only `wait_for()` and `notify_all()` are used at runtime.
+### `@cached` (`_cached.py`)
+- `_wrapper()` dispatches to one closure per lock/condition/info combination;
+  `condition` without `lock` serves as both.
+- Attributes: `cache`, `cache_key`, `cache_lock`, `cache_condition`, `cache_clear()`;
+  `info=True` adds `cache_info()`, `info=False` sets `cache_info = None`.
+- Call `functools.update_wrapper()` *before* setting wrapper attributes, so stacked
+  `@cached` decorators keep their own state (`test_stacked_decorators`).
+- `cache=None` is deprecated and emits `DeprecationWarning`.
+- On methods, the cache and counters are shared by all instances.
 
-### Key Generation (`keys.py`)
-- `hashkey`: Default key function; `_HashedTuple` caches hash values
-- `methodkey`: Drops `self` from key; `typedkey`/`typedmethodkey`: Adds `type()` info
+### `@cachedmethod` (`_cachedmethod.py`, `_descriptor.py`)
+- Each variant defines a `Descriptor` with a nested per-instance `Wrapper`.
+  `_MethodDescriptor.__get__` stores the wrapper in `obj.__dict__` via `setdefault`;
+  for `super()` calls it stores it under `"__cachetools_cachedmethods"` keyed by
+  descriptor. Class access returns a plain, lazily created `unbound` function that
+  dispatches through `__get__`.
+- `__set_name__` on two names, or instances without a writable `__dict__`, raise
+  `TypeError`.
+- `@cachedmethod` + `@classmethod` (`_ClassMethodDescriptor`, `info=False` only) and
+  instances without `__dict__` are **deprecated** and warn instead of raising.
+- Stampede prevention uses a pending set per instance.
 
-## Developer Workflows
+### Shared behavior
+- `CacheInfo` matches the stdlib namedtuple. Wrappers swallow `ValueError` on store;
+  lock-only variants store via `setdefault()` (first result wins).
+- Locking tiers: unlocked | locked (released while computing) | condition (pending
+  keys + `wait_for`/`notify_all`). Same-key recursion deadlocks in the condition tier.
 
-### Testing
+### `cachetools.func` and `keys.py`
+- `*_cache` decorators use `cached(..., condition=Condition(), info=True)` and add
+  `cache_parameters()`. Bare `@lru_cache` works; `maxsize=None` uses a `dict`
+  (`ttl_cache`: `_UnboundTTLCache`).
+- `hashkey` returns a `_HashedTuple` (cached hash, not pickled); `methodkey` drops
+  `self`; `typed*` variants append argument types.
+
+## Type Stubs (`*.pyi`)
+- No annotations in `.py` files; types live in the stubs.
+- `@overload`s split `info=False` (default, first) and `info=True`. Wrappers use
+  `ParamSpec`; `_cachedmethod_wrapper` uses `Concatenate[Any, _P]`.
+- `_cached_wrapper`, `_cached_wrapper_info`, `_cachetools_cache_wrapper` have three
+  `__get__` overloads: class access, instance binding via `Concatenate`, and a
+  required `obj: object` catch-all for `@staticmethod`. `_cached_wrapper_info` needs
+  a scoped `# pyright: ignore[reportIncompatibleMethodOverride]`.
+- `_cachedmethod_unbound.__call__` has a receiver-less overload for deprecated
+  `@classmethod` use; keep `tests/test_classmethod.py` type-clean.
+- All wrapper stubs declare `__name__` and `__qualname__`.
+
+## Development
+
 ```bash
-tox -e py                                 # Run tests with coverage
-tox -e ruff                               # Linting (ruff check)
-tox -e ruff-format                        # Format check (ruff format --diff)
-tox -e pyright                            # Type checking
-tox -e docs                               # Build docs
-tox -e doctest                            # Run doctests
+tox -p auto                                # all: py, docs, doctest, pyright, ruff, ruff-format
+tox -e py -- tests/test_ttl.py -k expire   # posargs go to pytest
 ```
 
-- `tests/__init__.py`: `CacheTestMixin` (23 standard tests), `_TestCaseProtocol`, `CountedLock`, `CountedCondition` (implements full `_AbstractCondition` protocol)
-- Each cache test inherits `unittest.TestCase` + `CacheTestMixin`
-- `test_cached.py` / `test_cachedmethod.py` use `DecoratorTestMixin` / `MethodDecoratorTestMixin` for all lock/condition/info combos
-- `test_classmethod.py` covers the deprecated `@cachedmethod` + `@classmethod` combinations and their `DeprecationWarning`s
-- Threading tests (`test_threading.py`) cover both condition-based stampede prevention and lock-only race resolution under real concurrency; `TIMEOUT` class constant + `thread.join(timeout=TIMEOUT)` + `assertFalse(t.is_alive())` guard against deadlock hangs
+- CI runs `tox` on CPython 3.10–3.15, free-threaded 3.13t–3.15t and PyPy.
+  On 3.13+, two deprecated `@classmethod` lines show as uncovered.
+- **ruff** for formatting and linting. **pyright** in `standard` mode; prefer scoped
+  suppressions (file-level `# pyright: rule=false`, `# pyright: ignore[rule]`) over
+  global ones. `reportUnnecessaryTypeIgnoreComment` flags stale ignores.
 
-### Code Style
-- **ruff** formatter and linter (`tox -e ruff-format`, `tox -e ruff`); lint ignores `DTZ005` and `UP031` in `pyproject.toml`
-- **pyright** runs in `typeCheckingMode = "standard"`, with `reportFunctionMemberAccess` downgraded to `information`
+## Tests
+- `tests/__init__.py`: `CacheTestMixin` (shared by all cache types), `CountedLock`,
+  `CountedCondition`. One `TestCase` per cache type; TTL tests use a manual `Timer`.
+- `test_cached.py`/`test_cachedmethod.py` cover all lock/condition/info combinations.
+  `test_func.py` calls decorators via `Callable[..., Any]`, so stub checks need
+  concrete, annotated tests (`test_decorator_method`,
+  `test_decorator_method_typed`); avoid `# type: ignore` there.
+- `test_threading.py`: guard against hangs with `thread.join(timeout=TIMEOUT)` and
+  `assertFalse(t.is_alive())`.
 
-## Conventions
-
-### Adding New Cache Types
-1. Inherit from `Cache` or `_TimedCache`
-2. Override `__setitem__`, `__delitem__`, `popitem()` (optionally `__getitem__`)
-3. Use default parameters to call parent: `def __setitem__(self, key, value, cache_setitem=Cache.__setitem__)`
-4. Handle `__missing__` edge case: check `if key in self` after parent call
-5. Override `clear()` to reset the subclass bookkeeping in O(1)
-6. Add test class inheriting `CacheTestMixin`
-
-### Changelog
-**Do not edit `CHANGELOG.rst`.** It is updated by the maintainer only, immediately before a release is published. Never add, amend, or reorder entries as part of a regular code change.
-
-### Type Stubs
-Inline stubs ship with the package (`py.typed` marker):
-- `@overload` distinguishes `info=True` vs `info=False`; `Literal[False]` overload listed last
-- `_TimedCache` uses `Generic[_KT, _VT, _TT]` with `_TT` defaulting to `float`
-- `_AbstractCondition` is `@type_check_only` `Protocol` for `condition` params and `cache_condition` attributes
-- `_cached_wrapper` / `_cachedmethod_wrapper` use `ParamSpec(_P)` to preserve decorated function signatures; `__call__` uses `_P.args`/`_P.kwargs`
-- `_cachedmethod_wrapper` models the descriptor protocol: `__set_name__`, `__get__`, `__call__`; uses `Concatenate[Any, _P]` so `_P` excludes `self`
-- `_cachedmethod.py` uses `# type: ignore` for `functools.update_wrapper()` (typeshed #9846)
-- Validate stubs with `tox -e pyright`
+## Maintainer Decisions (do not re-raise)
+- Pickling caches stays undocumented and unsupported.
+- `copy.copy()` of an instance with an active `@cachedmethod` wrapper shares the
+  wrapper; accepted.
+- Stacking `@cachedmethod` decorators is unsupported and untested.
 
 ## Key Files
-- `src/cachetools/__init__.py` — All cache implementations
-- `src/cachetools/__init__.pyi` — Type stubs for caches and decorators
-- `src/cachetools/_cached.py` — `@cached` decorator variants
-- `src/cachetools/_cachedmethod.py` — `@cachedmethod` descriptor variants
-- `src/cachetools/keys.py` / `keys.pyi` — Key functions
-- `src/cachetools/func.py` / `func.pyi` — Functools-compatible wrappers (`lru_cache`, `ttl_cache`, etc.)
-- `tests/__init__.py` — Test mixin and helpers
-- `pyproject.toml` — Build config plus `ruff`/`pyright` settings; version: `{attr = "cachetools.__version__"}` (`__version__` lives in `src/cachetools/__init__.py`)
-- `CHANGELOG.rst` — Maintainer-only, written at release time; do not modify
+- `src/cachetools/__init__.py` / `__init__.pyi` — caches, decorator entry points
+- `_cached.py`, `_cachedmethod.py`, `_descriptor.py` — decorator implementations
+- `keys.py`, `func.py` (+ `.pyi`) — key functions, `functools`-style decorators
+- `docs/index.rst` — user docs; `.github/copilot-review.md` — latest review findings

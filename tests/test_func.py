@@ -4,10 +4,10 @@ from typing import Any
 
 import cachetools.func
 
-from . import _TestCaseProtocol
+from . import SimplifiedTestCaseProtocol
 
 
-class DecoratorTestMixin(_TestCaseProtocol):
+class DecoratorTestMixin(SimplifiedTestCaseProtocol):
     DECORATOR: Callable[..., Any]
 
     def decorator(self, maxsize, **kwargs):
@@ -109,9 +109,76 @@ class DecoratorTestMixin(_TestCaseProtocol):
         # Then do a call which will cause a deadlock with a non-reentrant lock.
         self.assertEqual(cached(RecursiveEquals(True)), RecursiveEquals(True))
 
+    def test_decorator_method(self):
+        """Though it is not encouraged, like functools.lru_cache, the
+        cachetools.func decorators may be used on methods, too.
+
+        """
+
+        decorator = self.decorator(maxsize=2)
+
+        class Cached:
+            @decorator
+            def get(self, n):
+                return n
+
+        cached = Cached()
+        self.assertEqual(cached.get(1), 1)
+        self.assertEqual(cached.get(1), 1)
+        self.assertEqual(Cached.get(cached, 1), 1)
+        self.assertEqual(cached.get.cache_info(), (2, 1, 2, 1))
+        self.assertEqual(Cached.get.cache_info(), (2, 1, 2, 1))
+        cached.get.cache_clear()
+        self.assertEqual(cached.get.cache_info(), (0, 0, 2, 0))
+        self.assertEqual(Cached.get.cache_info(), (0, 0, 2, 0))
+
+    def test_stacked_decorators(self):
+        inner_wrapper = self.decorator(maxsize=2)(lambda n: n)
+        outer_wrapper = self.decorator(maxsize=3, typed=True)(inner_wrapper)
+        self.assertIs(outer_wrapper.__wrapped__, inner_wrapper)
+        self.assertEqual(
+            inner_wrapper.cache_parameters(), {"maxsize": 2, "typed": False}
+        )
+        self.assertEqual(
+            outer_wrapper.cache_parameters(), {"maxsize": 3, "typed": True}
+        )
+        self.assertEqual(outer_wrapper(1), 1)
+        self.assertEqual(outer_wrapper(1), 1)
+        self.assertEqual(outer_wrapper.cache_info(), (1, 1, 3, 1))
+        self.assertEqual(inner_wrapper.cache_info(), (0, 1, 2, 1))
+        outer_wrapper.cache_clear()
+        self.assertEqual(outer_wrapper.cache_info(), (0, 0, 3, 0))
+        self.assertEqual(inner_wrapper.cache_info(), (0, 1, 2, 1))
+
 
 class FIFODecoratorTest(unittest.TestCase, DecoratorTestMixin):
     DECORATOR = staticmethod(cachetools.func.fifo_cache)
+
+    def test_method_typed(self):
+        """Type-checked by pyright via the stub __get__ overloads."""
+
+        class Cached:
+            @cachetools.func.fifo_cache(maxsize=2)
+            def get(self, n: int) -> int:
+                return n
+
+            @cachetools.func.fifo_cache
+            def get_bare(self, n: int) -> int:
+                return n
+
+            @staticmethod
+            @cachetools.func.fifo_cache
+            def get_static(n: int) -> int:
+                return n
+
+        cached = Cached()
+        result: int = cached.get(1)
+        self.assertEqual(result, 1)
+        self.assertEqual(Cached.get(cached, 1), 1)
+        self.assertEqual(cached.get.cache_info(), (1, 1, 2, 1))
+        self.assertEqual(cached.get_bare(1), 1)
+        self.assertEqual(cached.get_static(1), 1)
+        self.assertEqual(Cached.get_static(1), 1)
 
 
 class LFUDecoratorTest(unittest.TestCase, DecoratorTestMixin):

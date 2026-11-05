@@ -29,7 +29,9 @@ __all__: Final = (
 __version__: str
 
 _P = ParamSpec("_P")
+_Q = ParamSpec("_Q")
 _R = TypeVar("_R")
+_S = TypeVar("_S")
 _T = TypeVar("_T")
 _KT = TypeVar("_KT")
 _VT = TypeVar("_VT")
@@ -141,7 +143,8 @@ class _CacheInfo(NamedTuple):
 
 @type_check_only
 class _AbstractCondition(AbstractContextManager[Any], Protocol):
-    # implementation and unit tests do not use plain wait() and notify()
+    # implementation and unit tests currently do not use plain wait()
+    # and notify(); these are reserved for future use
     def wait(self, timeout: float | None = None) -> bool: ...
     def wait_for(
         self, predicate: Callable[[], _T], timeout: float | None = None
@@ -153,16 +156,47 @@ class _AbstractCondition(AbstractContextManager[Any], Protocol):
 class _cached_wrapper(Generic[_P, _R]):
     __wrapped__: Callable[_P, _R]
     __name__: str
+    __qualname__: str
     __doc__: str | None
     cache: MutableMapping[Any, Any] | None
     cache_key: Callable[..., Any] = ...
     cache_lock: AbstractContextManager[Any] | None = None
     cache_condition: _AbstractCondition | None = None
+    @overload  # class access, e.g. Cls.method
+    def __get__(
+        self, obj: None, objtype: type | None = None
+    ) -> _cached_wrapper[_P, _R]: ...
+    @overload  # instance access binds the first parameter
+    def __get__(
+        self: _cached_wrapper[Concatenate[_S, _Q], _R],
+        obj: _S,
+        objtype: type | None = None,
+    ) -> _cached_wrapper[_Q, _R]: ...
+    @overload  # fallback, e.g. when wrapped by @staticmethod or @classmethod
+    def __get__(
+        self, obj: object, objtype: type | None = None
+    ) -> _cached_wrapper[_P, _R]: ...
     def __call__(self, /, *args: _P.args, **kwargs: _P.kwargs) -> _R: ...
     def cache_clear(self) -> None: ...
 
 @type_check_only
 class _cached_wrapper_info(_cached_wrapper[_P, _R]):
+    @overload
+    def __get__(
+        self, obj: None, objtype: type | None = None
+    ) -> _cached_wrapper_info[_P, _R]: ...
+    @overload
+    def __get__(
+        self: _cached_wrapper_info[Concatenate[_S, _Q], _R],
+        obj: _S,
+        objtype: type | None = None,
+    ) -> _cached_wrapper_info[_Q, _R]: ...
+    # pyright cannot match the self-typed base overload; each return type is
+    # the _cached_wrapper_info subtype of the corresponding base return type
+    @overload
+    def __get__(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, obj: object, objtype: type | None = None
+    ) -> _cached_wrapper_info[_P, _R]: ...
     def cache_info(self) -> _CacheInfo: ...
 
 @overload
@@ -192,15 +226,33 @@ def cached(
 ) -> Callable[[Callable[_P, _R]], _cached_wrapper_info[_P, _R]]: ...
 
 @type_check_only
+class _cachedmethod_unbound(Generic[_P, _R]):
+    __wrapped__: Callable[Concatenate[Any, _P], _R]
+    __name__: str
+    __qualname__: str
+    __doc__: str | None
+    @overload
+    def __call__(self, obj: Any, /, *args: _P.args, **kwargs: _P.kwargs) -> _R: ...
+    # deprecated @classmethod use
+    @overload
+    def __call__(self, /, *args: _P.args, **kwargs: _P.kwargs) -> _R: ...
+
+@type_check_only
 class _cachedmethod_wrapper(Generic[_P, _R]):
     __wrapped__: Callable[Concatenate[Any, _P], _R]
     __name__: str
+    __qualname__: str
     __doc__: str | None
     cache: MutableMapping[Any, Any]
     cache_key: Callable[..., Any] = ...
     cache_lock: AbstractContextManager[Any] | None = None
     cache_condition: _AbstractCondition | None = None
     def __set_name__(self, owner: type, name: str) -> None: ...
+    @overload
+    def __get__(
+        self, obj: None, objtype: type | None = None
+    ) -> _cachedmethod_unbound[_P, _R]: ...
+    @overload
     def __get__(
         self, obj: Any, objtype: type | None = None
     ) -> _cachedmethod_wrapper[_P, _R]: ...
@@ -209,6 +261,11 @@ class _cachedmethod_wrapper(Generic[_P, _R]):
 
 @type_check_only
 class _cachedmethod_wrapper_info(_cachedmethod_wrapper[_P, _R]):
+    @overload
+    def __get__(
+        self, obj: None, objtype: type | None = None
+    ) -> _cachedmethod_unbound[_P, _R]: ...
+    @overload
     def __get__(
         self, obj: Any, objtype: type | None = None
     ) -> _cachedmethod_wrapper_info[_P, _R]: ...
